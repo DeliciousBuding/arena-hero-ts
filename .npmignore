@@ -1,0 +1,11 @@
+# Python 上游（git 依赖安装时排除，缩小 node_modules）
+src/
+tests/
+examples/
+docs/
+uv.lock
+pyproject.toml
+.github/
+# 仓库级文档与产物
+runs/
+*.md
