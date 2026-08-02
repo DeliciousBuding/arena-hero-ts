@@ -133,7 +133,11 @@ function asPosition(value: unknown, context: string): Position {
     Array.isArray(value) &&
     value.length === 2 &&
     typeof value[0] === "number" &&
-    typeof value[1] === "number"
+    typeof value[1] === "number" &&
+    Number.isInteger(value[0]) &&
+    Number.isInteger(value[1]) &&
+    Number.isFinite(value[0]) &&
+    Number.isFinite(value[1])
   ) {
     return [value[0], value[1]] as const;
   }
@@ -142,6 +146,14 @@ function asPosition(value: unknown, context: string): Position {
 
 function asString(value: unknown, field: string, context: string): string {
   if (typeof value !== "string") {
+    throw new ProtocolError(`invalid ${field} in ${context}`);
+  }
+  return value;
+}
+
+/** 有限非负整数（拒绝 "5"/NaN/Infinity/负数/小数——对应上游 pydantic int 约束）。 */
+function int(value: unknown, field: string, context: string, min = 0): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || !Number.isFinite(value) || value < min) {
     throw new ProtocolError(`invalid ${field} in ${context}`);
   }
   return value;
@@ -198,12 +210,12 @@ export function parseWorldObject(value: unknown): WorldObject {
       controlled: value.controlled === true,
       owner_username: asString(value.owner_username, "owner_username", "core"),
       position: asPosition(value.position, "core"),
-      hp: value.hp as number,
-      shield: value.shield as number,
+      hp: int(value.hp, "hp", "core"),
+      shield: int(value.shield, "shield", "core"),
       state: state as CoreState,
       move_direction: value.move_direction == null ? null : (value.move_direction as Direction),
-      move_progress: value.move_progress == null ? null : (value.move_progress as number),
-      move_required_ticks: value.move_required_ticks == null ? null : (value.move_required_ticks as number),
+      move_progress: value.move_progress == null ? null : int(value.move_progress, "move_progress", "core"),
+      move_required_ticks: value.move_required_ticks == null ? null : int(value.move_required_ticks, "move_required_ticks", "core", 1),
       destination: value.destination == null ? null : asPosition(value.destination, "core"),
     } satisfies CoreView;
   }
@@ -212,7 +224,7 @@ export function parseWorldObject(value: unknown): WorldObject {
     if (unitType !== UT.WORKER && unitType !== UT.VANGUARD && unitType !== UT.RANGER) {
       throw new ProtocolError(`invalid unit type: ${unitType}`);
     }
-    const cargo = value.cargo == null ? null : (value.cargo as number);
+    const cargo = value.cargo == null ? null : int(value.cargo, "cargo", "unit");
     if (cargo !== null && (value.controlled !== true || unitType !== UT.WORKER)) {
       throw new ProtocolError("cargo is only valid for a controlled Worker");
     }
@@ -221,7 +233,7 @@ export function parseWorldObject(value: unknown): WorldObject {
       id: asString(value.id, "id", "unit"),
       controlled: value.controlled === true,
       position: asPosition(value.position, "unit"),
-      hp: value.hp as number,
+      hp: int(value.hp, "hp", "unit"),
       unit_type: unitType as UnitType,
       cargo,
     } satisfies UnitView;
@@ -235,7 +247,7 @@ export function parseEvent(value: unknown): ResolutionEvent {
   }
   return {
     event_id: asString(value.event_id, "event_id", "event"),
-    tick: value.tick as number,
+    tick: int(value.tick, "tick", "event", 1),
     event_type: asString(value.event_type, "event_type", "event"),
     reason_code: value.reason_code == null ? null : (value.reason_code as string),
     actor_id: value.actor_id == null ? null : (value.actor_id as string),
@@ -253,7 +265,7 @@ export function parsePlayerState(value: unknown): PlayerState {
   if (status !== PS.ACTIVE && status !== PS.RESPAWNING) {
     throw new ProtocolError(`invalid player status: ${status}`);
   }
-  const respawnAtTick = value.respawn_at_tick == null ? null : (value.respawn_at_tick as number);
+  const respawnAtTick = value.respawn_at_tick == null ? null : int(value.respawn_at_tick, "respawn_at_tick", "player state", 1);
   if (status === PS.RESPAWNING && respawnAtTick === null) {
     throw new ProtocolError("RESPAWNING state requires respawn_at_tick");
   }
@@ -269,10 +281,10 @@ export function parsePlayerState(value: unknown): PlayerState {
   return {
     status: status as PlayerStatus,
     respawn_at_tick: respawnAtTick,
-    resources: value.resources as number,
-    population: value.population as number,
-    population_tier: value.population_tier as number,
-    upkeep_next_tick: value.upkeep_next_tick as number,
+    resources: int(value.resources, "resources", "player state"),
+    population: int(value.population, "population", "player state"),
+    population_tier: int(value.population_tier, "population_tier", "player state"),
+    upkeep_next_tick: int(value.upkeep_next_tick, "upkeep_next_tick", "player state"),
     champion_beacon: parseBeacon(value.champion_beacon),
     objects: value.objects.map(parseWorldObject),
     events: value.events.map(parseEvent),

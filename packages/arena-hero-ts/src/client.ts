@@ -34,6 +34,8 @@ export interface ClientOptions {
   reconnectMinDelay?: number;
   reconnectMaxDelay?: number;
   maxMessageSize?: number;
+  /** 握手超时（毫秒），超过视为连接失败进入重连。默认 15000。 */
+  handshakeTimeoutMs?: number;
 }
 
 export interface ClientConfig {
@@ -45,6 +47,7 @@ export interface ClientConfig {
   reconnectMinDelay: number;
   reconnectMaxDelay: number;
   maxMessageSize: number;
+  handshakeTimeoutMs: number;
 }
 
 export function buildConfig(options: ClientOptions): ClientConfig {
@@ -57,6 +60,7 @@ export function buildConfig(options: ClientOptions): ClientConfig {
     reconnectMinDelay = 0.25,
     reconnectMaxDelay = 5.0,
     maxMessageSize = 2 * 1024 * 1024,
+    handshakeTimeoutMs = 15_000,
   } = options;
   if (!apiKey || !apiKey.trim()) {
     throw new ConfigurationError("api_key must be a non-empty string");
@@ -92,6 +96,7 @@ export function buildConfig(options: ClientOptions): ClientConfig {
     reconnectMinDelay,
     reconnectMaxDelay,
     maxMessageSize,
+    handshakeTimeoutMs,
   };
 }
 
@@ -156,7 +161,9 @@ function isReceived(message: Tick | PlayerState | Received): message is Received
 class MessageQueue {
   private messages: string[] = [];
   private waiters: Array<(value: string | null) => void> = [];
+  private errorWaiters: Array<(err: Error) => void> = [];
   private ended = false;
+  private failure: Error | null = null;
 
   push(message: string): void {
     if (this.ended) {
@@ -178,7 +185,22 @@ class MessageQueue {
     }
   }
 
+  /** 协议错误：后续 next() 一律抛出（迭代器向上传播，不重连）。 */
+  fail(err: Error): void {
+    this.ended = true;
+    this.failure = err;
+    for (const waiter of this.waiters.splice(0)) {
+      waiter(null);
+    }
+    for (const reject of this.errorWaiters.splice(0)) {
+      reject(err);
+    }
+  }
+
   async next(): Promise<string | null> {
+    if (this.failure !== null) {
+      throw this.failure;
+    }
     const message = this.messages.shift();
     if (message !== undefined) {
       return message;
@@ -186,7 +208,10 @@ class MessageQueue {
     if (this.ended) {
       return null;
     }
-    return new Promise((resolve) => this.waiters.push(resolve));
+    return new Promise((resolve, reject) => {
+      this.waiters.push(resolve);
+      this.errorWaiters.push(reject);
+    });
   }
 }
 
@@ -227,20 +252,27 @@ export class ArenaHeroClient {
           this._socket = ws;
           delay = this.config.reconnectMinDelay;
           for (;;) {
-            const raw = await queue.next();
+            const raw = await queue.next(); // 协议违规在此抛出（不重连）
             if (raw === null) {
               break;
             }
             yield this._materialize(parseStreamMessage(raw));
           }
-          if (this._socket?.readyState === WebSocket.CLOSED && this._closeCode === 1000) {
+          const code = this._closeCode;
+          if (code === 1000) {
             return; // 服务端正常结束
           }
+          if (code === 1008) {
+            // 已连接状态下收到 Policy Violation：终止而非静默重连
+            throw new PolicyViolationError("WebSocket closed with 1008 Policy Violation");
+          }
+          // 其他 close code（1001/1006/1011...）：进入重连
         } catch (exc) {
           overrideDelay = this._classifyError(exc);
         } finally {
           this._socket = null;
           this._closeCode = null;
+          this._establishedError = null;
           abort.abort();
           this._abortController = null;
         }
@@ -322,6 +354,7 @@ export class ArenaHeroClient {
   }
 
   private _closeCode: number | null = null;
+  private _establishedError: Error | null = null;
 
   private _connect(queue: MessageQueue, signal: AbortSignal): Promise<WebSocket> {
     return new Promise((resolve, reject) => {
@@ -331,41 +364,77 @@ export class ArenaHeroClient {
           "User-Agent": USER_AGENT,
         },
         maxPayload: this.config.maxMessageSize,
+        perMessageDeflate: false, // 与上游一致：协议面不启用压缩
       });
-      const onOpen = () => {
-        ws.removeListener("open", onOpen);
-        ws.removeListener("error", onError);
+      let settled = false;
+      const cleanup = () => {
+        clearTimeout(handshakeTimer);
+        signal.removeEventListener("abort", onAbort);
+      };
+      const fail = (err: Error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        queue.end();
+        reject(err);
+      };
+      const succeed = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        // 握手成功：error handler 保留为 established 阶段兜底
         resolve(ws);
       };
-      const onError = (err: Error) => {
-        ws.removeListener("open", onOpen);
-        ws.removeListener("error", onError);
+      const onAbort = () => {
+        // close()/外部取消：终止可能仍在握手的 socket
+        ws.terminate();
+        fail(new Error("connect aborted"));
+      };
+      const handshakeTimer = setTimeout(() => {
+        ws.terminate();
+        fail(new TransportError("WebSocket handshake timed out"));
+      }, this.config.handshakeTimeoutMs);
+      signal.addEventListener("abort", onAbort);
+      ws.on("open", succeed);
+      ws.on("error", (err: Error) => {
         // ws 握手失败消息形如 'Unexpected server response: 401'——提取状态码
         const match = /Unexpected server response: (\d+)/.exec(err.message);
         if (match) {
           (err as Error & { status?: number }).status = Number(match[1]);
         }
-        queue.end();
-        reject(err);
-      };
-      ws.on("open", onOpen);
-      ws.on("error", onError);
-      ws.on("message", (data: RawData) => {
-        queue.push(data.toString());
+        if (!settled) {
+          fail(err);
+          return;
+        }
+        // established 阶段：记录异常，等待 close 事件驱动收尾
+        this._establishedError = err;
+      });
+      ws.on("message", (data: RawData, isBinary: boolean) => {
+        if (isBinary) {
+          // 协议违规（上游：拒绝 binary 帧）：终止流，向上传播 ProtocolError
+          queue.fail(new ProtocolError("the server sent a binary WebSocket message"));
+          return;
+        }
+        queue.push(data.toString("utf8"));
       });
       ws.on("close", (code: number) => {
         this._closeCode = code;
         queue.end();
       });
-      if (signal.aborted) {
-        queue.end();
-        ws.close();
-        reject(new Error("aborted"));
-      }
     });
   }
 
   private _classifyError(exc: unknown): number | null {
+    if (exc instanceof ProtocolError) {
+      throw exc; // 协议违规：直接传播，不重连（与上游一致）
+    }
+    if (exc instanceof PolicyViolationError) {
+      throw exc;
+    }
     if (exc instanceof Error && "status" in exc) {
       const status = (exc as { status?: number }).status;
       if (status === 401 || status === 403) {

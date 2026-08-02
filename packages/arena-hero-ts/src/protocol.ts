@@ -36,7 +36,7 @@ function parseEnvelope(raw: string): StreamEnvelope {
   }
   const envelope = parsed as Record<string, unknown>;
   if (envelope.type === "tick") {
-    if (typeof envelope.data !== "number" || envelope.data < 1) {
+    if (typeof envelope.data !== "number" || !Number.isInteger(envelope.data) || envelope.data < 1) {
       throw new ProtocolError("invalid tick message");
     }
     return { type: "tick", data: envelope.data };
@@ -101,7 +101,14 @@ export function parseAccepted(raw: Uint8Array): Accepted {
     throw new ProtocolError("invalid command acknowledgement");
   }
   const a = parsed as Partial<Accepted>;
-  if (a?.accepted !== true || typeof a.tick !== "number" || typeof a.received_at !== "string") {
+  if (
+    a?.accepted !== true ||
+    typeof a.tick !== "number" ||
+    !Number.isInteger(a.tick) ||
+    a.tick < 1 ||
+    typeof a.received_at !== "string" ||
+    (a.source !== "AGENT" && a.source !== "MANUAL")
+  ) {
     throw new ProtocolError("invalid command acknowledgement");
   }
   return a as Accepted;
