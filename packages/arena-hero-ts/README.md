@@ -9,6 +9,7 @@ src/                 ← 上游 Python SDK（原样保留，用于 merge 上游�
 packages/arena-hero-ts/
   src/               ← TS 实现（本包）
   test/              ← TS 测试
+contracts/           ← 契约产物（generated/ JSON Schema + fixtures/ 真实样本）
 ```
 
 - 上游更新：`git merge upstream/main`（冲突面 = src/ Python 侧，本包目录不动）
@@ -17,5 +18,6 @@ packages/arena-hero-ts/
 
 ## 设计基线
 
-- 零运行时依赖：Node 22+ 内置 `fetch` / `WebSocket` / `node:sqlite`
-- 消费方（arena 编排层）经 jiti/tsx 直接加载 TS 源码（与 pi-arena 一致）
+- 运行时依赖：`typebox`（wire schema 单源）+ `ws`（WebSocket）
+- 消费方（arena 编排层）经 tsx 直接加载 TS 源码（git 依赖安装，见根 README）
+- wire 校验分层：TypeBox 字段级（wire-schema.ts）+ domain 关系约束（types.ts）

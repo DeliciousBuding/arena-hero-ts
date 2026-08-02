@@ -5,7 +5,7 @@ fork：https://github.com/DeliciousBuding/arena-hero-ts（public）
 
 ## 同步流程
 
-1. `git fetch upstream`（remote upstream = 上游仓库）
+1. `git remote add upstream https://github.com/arena-hero/arena-hero-python`（首次，当前未配置）
 2. 上游变更（pyproject/版本/changelog）→ `git merge upstream/main`（冲突面=src/ Python 侧）
 3. **协议变更必须手动同步到 TS 实现**（packages/arena-hero-ts/），在本文件追加记录
 
