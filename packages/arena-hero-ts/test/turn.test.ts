@@ -110,6 +110,26 @@ test("submit 提交当前排队计划", async () => {
   });
 });
 
+test("replace 用外部计划整体替换排队计划（编排层决策注入）", async () => {
+  let submitted: unknown = null;
+  const turn = new Turn(4, makeState([workerView, coreView]), async (plan) => {
+    submitted = plan;
+    return { accepted: true, tick: 4, source: "AGENT", received_at: "2026-08-02T12:00:00Z" };
+  });
+  (turn.unit(workerView.id) as Worker).harvest(); // 先排动作
+  turn.replace({
+    tick: 4,
+    unit_actions: { [workerView.id]: { type: "MOVE", direction: "UP" } },
+    core_action: null,
+  });
+  await turn.submit();
+  assert.deepEqual(submitted, {
+    tick: 4,
+    unit_actions: { [workerView.id]: { type: "MOVE", direction: "UP" } },
+    core_action: null,
+  });
+});
+
 test("seal 后动作与提交被拒", async () => {
   const turn = new Turn(5, makeState([workerView, coreView]), async () => {
     throw new Error("unused");

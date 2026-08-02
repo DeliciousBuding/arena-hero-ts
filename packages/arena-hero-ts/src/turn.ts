@@ -368,6 +368,13 @@ export class Turn {
     this.builder.coreAction = null;
   }
 
+  /** 用外部计划整体替换排队计划（编排层决策注入，如 arena-agent runtime loop）。 */
+  replace(plan: CommandPlan): void {
+    this.builder.ensureOpen();
+    this.builder.unitActions = { ...plan.unit_actions };
+    this.builder.coreAction = plan.core_action;
+  }
+
   /** 提交当前排队计划。 */
   async submit(options: { idempotencyKey?: string | null } = {}): Promise<Accepted> {
     return this.submitter(this.plan, options.idempotencyKey ?? null);
