@@ -14,7 +14,7 @@ import { parseStreamMessage } from "../src/protocol.ts";
 import { ProtocolError } from "../src/errors.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const FIXTURES = join(here, "..", "..", "contracts", "fixtures", "raw-ws");
+const FIXTURES = join(here, "..", "..", "..", "contracts", "fixtures", "raw-ws");
 
 function fixtureFiles(): string[] {
   try {
