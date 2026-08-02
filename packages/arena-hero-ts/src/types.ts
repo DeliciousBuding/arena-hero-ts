@@ -1,7 +1,8 @@
 /** Immutable models for Arena Hero state and WebSocket messages.
  *
- * 数据模型为纯只读接口；网络边界解析后经窄校验（见 protocol.ts），
- * 校验失败抛 ProtocolError——对应上游 pydantic 的防御性校验。
+ * 数据模型为纯只读接口；wire 字段级校验由 TypeBox schema 承担
+ * （wire-schema.ts，单源）；本文件保留 domain 层关系约束
+ * （cross-field 不变量）与事件辅助属性。
  */
 
 import { ProtocolError } from "./errors.ts";
@@ -14,7 +15,7 @@ import type {
   PlayerStatus,
   UnitType,
 } from "./enums.ts";
-import { BeaconStatus as BS, CommandSource as CS, CoreState as CSt, PlayerStatus as PS, UnitType as UT } from "./enums.ts";
+import { CoreState as CSt, PlayerStatus as PS, UnitType as UT } from "./enums.ts";
 import type { Position } from "./geometry.ts";
 import type { CommandPlan } from "./actions.ts";
 
@@ -122,173 +123,63 @@ export interface Received {
   plan: CommandPlan;
 }
 
-// ---- 窄校验：网络边界解析后的防御性检查（对应上游 pydantic model_validator） ----
+// ---- domain 层关系约束（wire schema 之外的 cross-field 不变量） ----
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function asPosition(value: unknown, context: string): Position {
-  if (
-    Array.isArray(value) &&
-    value.length === 2 &&
-    typeof value[0] === "number" &&
-    typeof value[1] === "number" &&
-    Number.isInteger(value[0]) &&
-    Number.isInteger(value[1]) &&
-    Number.isFinite(value[0]) &&
-    Number.isFinite(value[1])
-  ) {
-    return [value[0], value[1]] as const;
-  }
-  throw new ProtocolError(`invalid position in ${context}`);
-}
-
-function asString(value: unknown, field: string, context: string): string {
-  if (typeof value !== "string") {
-    throw new ProtocolError(`invalid ${field} in ${context}`);
-  }
-  return value;
-}
-
-/** 有限非负整数（拒绝 "5"/NaN/Infinity/负数/小数——对应上游 pydantic int 约束）。 */
-function int(value: unknown, field: string, context: string, min = 0): number {
-  if (typeof value !== "number" || !Number.isInteger(value) || !Number.isFinite(value) || value < min) {
-    throw new ProtocolError(`invalid ${field} in ${context}`);
-  }
-  return value;
-}
-
-export function parseBeacon(value: unknown): ChampionBeacon {
-  if (!isRecord(value)) {
-    throw new ProtocolError("invalid beacon");
-  }
-  const status = value.status == null ? null : asString(value.status, "status", "beacon");
-  if (status !== null && status !== BS.GROUND && status !== BS.CARRIED) {
-    throw new ProtocolError(`invalid beacon status: ${status}`);
-  }
-  const carrierId = value.carrier_id == null ? null : asString(value.carrier_id, "carrier_id", "beacon");
-  if (status === BS.CARRIED && carrierId === null) {
+/** 校验 beacon 的关系不变量（CARRIED 必须有 carrier）。 */
+export function checkBeaconRelations(beacon: ChampionBeacon): void {
+  if (beacon.status === "CARRIED" && beacon.carrier_id == null) {
     throw new ProtocolError("carrier_id is required when status is CARRIED");
   }
-  if (status !== BS.CARRIED && carrierId !== null) {
+  if (beacon.status !== "CARRIED" && beacon.carrier_id != null) {
     throw new ProtocolError("carrier_id is only valid when status is CARRIED");
   }
-  return {
-    position: asPosition(value.position, "beacon"),
-    status: status as BeaconStatus | null,
-    carrier_id: carrierId,
-  };
 }
 
-export function parseWorldObject(value: unknown): WorldObject {
-  if (!isRecord(value) || typeof value.kind !== "string") {
-    throw new ProtocolError("invalid world object");
+/** 校验 Core 的 MOVING/NORMAL 字段一致性。 */
+export function checkCoreRelations(core: CoreView): void {
+  const movement = [core.move_direction, core.move_progress, core.move_required_ticks, core.destination];
+  if (core.state === CSt.MOVING && movement.some((m) => m == null)) {
+    throw new ProtocolError("MOVING Core requires all movement fields");
   }
-  if (value.kind === "OBSTACLE" || value.kind === "RESOURCE") {
-    if (!Array.isArray(value.positions) || value.positions.length === 0) {
-      throw new ProtocolError("terrain positions must be non-empty");
-    }
-    const positions = value.positions.map((p) => asPosition(p, "terrain"));
-    return { kind: value.kind, positions } satisfies TerrainView;
+  if (core.state === CSt.NORMAL && movement.some((m) => m != null)) {
+    throw new ProtocolError("NORMAL Core cannot contain movement fields");
   }
-  if (value.kind === "CORE") {
-    const state = asString(value.state, "state", "core");
-    if (state !== CSt.NORMAL && state !== CSt.MOVING) {
-      throw new ProtocolError(`invalid core state: ${state}`);
-    }
-    const movement = [value.move_direction, value.move_progress, value.move_required_ticks, value.destination];
-    if (state === CSt.MOVING && movement.some((m) => m == null)) {
-      throw new ProtocolError("MOVING Core requires all movement fields");
-    }
-    if (state === CSt.NORMAL && movement.some((m) => m != null)) {
-      throw new ProtocolError("NORMAL Core cannot contain movement fields");
-    }
-    return {
-      kind: "CORE",
-      id: asString(value.id, "id", "core"),
-      controlled: value.controlled === true,
-      owner_username: asString(value.owner_username, "owner_username", "core"),
-      position: asPosition(value.position, "core"),
-      hp: int(value.hp, "hp", "core"),
-      shield: int(value.shield, "shield", "core"),
-      state: state as CoreState,
-      move_direction: value.move_direction == null ? null : (value.move_direction as Direction),
-      move_progress: value.move_progress == null ? null : int(value.move_progress, "move_progress", "core"),
-      move_required_ticks: value.move_required_ticks == null ? null : int(value.move_required_ticks, "move_required_ticks", "core", 1),
-      destination: value.destination == null ? null : asPosition(value.destination, "core"),
-    } satisfies CoreView;
-  }
-  if (value.kind === "UNIT") {
-    const unitType = asString(value.unit_type, "unit_type", "unit");
-    if (unitType !== UT.WORKER && unitType !== UT.VANGUARD && unitType !== UT.RANGER) {
-      throw new ProtocolError(`invalid unit type: ${unitType}`);
-    }
-    const cargo = value.cargo == null ? null : int(value.cargo, "cargo", "unit");
-    if (cargo !== null && (value.controlled !== true || unitType !== UT.WORKER)) {
-      throw new ProtocolError("cargo is only valid for a controlled Worker");
-    }
-    return {
-      kind: "UNIT",
-      id: asString(value.id, "id", "unit"),
-      controlled: value.controlled === true,
-      position: asPosition(value.position, "unit"),
-      hp: int(value.hp, "hp", "unit"),
-      unit_type: unitType as UnitType,
-      cargo,
-    } satisfies UnitView;
-  }
-  throw new ProtocolError(`unknown world object kind: ${value.kind}`);
 }
 
-export function parseEvent(value: unknown): ResolutionEvent {
-  if (!isRecord(value)) {
-    throw new ProtocolError("invalid resolution event");
+/** 校验 Unit 的 cargo 不变量（只在受控 Worker 上）。 */
+export function checkUnitRelations(unit: UnitView): void {
+  if (unit.cargo != null && (!unit.controlled || unit.unit_type !== UT.WORKER)) {
+    throw new ProtocolError("cargo is only valid for a controlled Worker");
   }
-  return {
-    event_id: asString(value.event_id, "event_id", "event"),
-    tick: int(value.tick, "tick", "event", 1),
-    event_type: asString(value.event_type, "event_type", "event"),
-    reason_code: value.reason_code == null ? null : (value.reason_code as string),
-    actor_id: value.actor_id == null ? null : (value.actor_id as string),
-    target_id: value.target_id == null ? null : (value.target_id as string),
-    position: value.position == null ? null : asPosition(value.position, "event"),
-    values: value.values == null ? null : (value.values as Record<string, unknown>),
-  };
 }
 
-export function parsePlayerState(value: unknown): PlayerState {
-  if (!isRecord(value)) {
-    throw new ProtocolError("invalid player state");
-  }
-  const status = asString(value.status, "status", "player state");
-  if (status !== PS.ACTIVE && status !== PS.RESPAWNING) {
-    throw new ProtocolError(`invalid player status: ${status}`);
-  }
-  const respawnAtTick = value.respawn_at_tick == null ? null : int(value.respawn_at_tick, "respawn_at_tick", "player state", 1);
-  if (status === PS.RESPAWNING && respawnAtTick === null) {
+/** 校验完整 PlayerState 的关系不变量。 */
+export function checkPlayerStateRelations(state: PlayerState): void {
+  if (state.status === PS.RESPAWNING && state.respawn_at_tick == null) {
     throw new ProtocolError("RESPAWNING state requires respawn_at_tick");
   }
-  if (status === PS.ACTIVE && respawnAtTick !== null) {
+  if (state.status === PS.ACTIVE && state.respawn_at_tick != null) {
     throw new ProtocolError("ACTIVE state cannot contain respawn_at_tick");
   }
-  if (!Array.isArray(value.objects)) {
-    throw new ProtocolError("player state objects must be an array");
+  checkBeaconRelations(state.champion_beacon);
+  for (const obj of state.objects) {
+    if (obj.kind === "CORE") {
+      checkCoreRelations(obj);
+    } else if (obj.kind === "UNIT") {
+      checkUnitRelations(obj);
+    }
   }
-  if (!Array.isArray(value.events)) {
-    throw new ProtocolError("player state events must be an array");
+}
+
+/** 校验 Received 的关系不变量（plan tick 与 receipt tick 一致）。 */
+export function checkReceivedConsistency(rec: Received): void {
+  if (rec.plan.tick !== rec.tick) {
+    throw new ProtocolError("received plan tick does not match receipt tick");
   }
-  return {
-    status: status as PlayerStatus,
-    respawn_at_tick: respawnAtTick,
-    resources: int(value.resources, "resources", "player state"),
-    population: int(value.population, "population", "player state"),
-    population_tier: int(value.population_tier, "population_tier", "player state"),
-    upkeep_next_tick: int(value.upkeep_next_tick, "upkeep_next_tick", "player state"),
-    champion_beacon: parseBeacon(value.champion_beacon),
-    objects: value.objects.map(parseWorldObject),
-    events: value.events.map(parseEvent),
-  };
 }
 
 // ---- ResolutionEvent 辅助属性（对应上游 pydantic property） ----
@@ -342,14 +233,4 @@ export function eventHarvestSource(ev: ResolutionEvent): HarvestSource | null {
     return null;
   }
   return source as HarvestSource;
-}
-
-/** Validate a Received envelope (plan tick must match receipt tick). */
-export function checkReceivedConsistency(rec: Received): void {
-  if (rec.plan.tick !== rec.tick) {
-    throw new ProtocolError("received plan tick does not match receipt tick");
-  }
-  if (rec.source !== CS.AGENT && rec.source !== CS.MANUAL) {
-    throw new ProtocolError(`invalid command source: ${rec.source}`);
-  }
 }

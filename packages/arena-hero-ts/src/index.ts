@@ -92,3 +92,8 @@ export {
 } from "./types.ts";
 export { parseStreamMessage, encodePlan, parseAccepted, apiError } from "./protocol.ts";
 export { Turn, Unit, Worker, Vanguard, Ranger, Core, type ObservedEntity } from "./turn.ts";
+export {
+  PlayerStateSchema, CommandPlanSchema, AcceptedSchema, ReceivedSchema,
+  StreamEnvelopeSchema, WorldObjectSchema, UnitActionSchema, CoreActionSchema,
+  toJsonSchema, type Position as WirePosition,
+} from "./wire-schema.ts";

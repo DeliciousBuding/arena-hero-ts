@@ -1,53 +1,35 @@
 /** Wire parsing and stable serialization for the public v0.1 protocol.
  *
- * 对应上游 _protocol.py：
- * - WS 流消息 envelope：{type:"tick",data:N} / {type:"state",data:PlayerState} /
- *   {type:"received",data:Received}，按 type 判别
- * - encodePlan 与上游逐字节兼容：sort_keys + exclude_none + 紧凑 JSON
+ * W1 重构：字段级校验由 TypeBox wire schema 承担（wire-schema.ts 单源），
+ * cross-field 关系约束由 types.ts 的 domain 校验承担。encodePlan 与上游
+ * 逐字节兼容：sort_keys + exclude_none + 紧凑 JSON。
  */
 
+import { Compile } from "typebox/compile";
 import type { Accepted, CommandPlan } from "./actions.ts";
 import { APIError, ProtocolError } from "./errors.ts";
-import { checkReceivedConsistency, parsePlayerState, type PlayerState, type Received, type Tick } from "./types.ts";
+import {
+  checkPlayerStateRelations,
+  checkReceivedConsistency,
+  type PlayerState,
+  type Received,
+  type Tick,
+} from "./types.ts";
+import {
+  AcceptedSchema,
+  ReceivedSchema,
+  StreamEnvelopeSchema,
+} from "./wire-schema.ts";
 
-interface TickEnvelope {
-  type: "tick";
-  data: number;
-}
-interface StateEnvelope {
-  type: "state";
-  data: unknown;
-}
-interface ReceivedEnvelope {
-  type: "received";
-  data: unknown;
-}
-type StreamEnvelope = TickEnvelope | StateEnvelope | ReceivedEnvelope;
+const streamValidator = Compile(StreamEnvelopeSchema);
+const acceptedValidator = Compile(AcceptedSchema);
+const receivedValidator = Compile(ReceivedSchema);
 
-function parseEnvelope(raw: string): StreamEnvelope {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw new ProtocolError("invalid Arena Hero WebSocket message");
+function check(value: unknown, validator: ReturnType<typeof Compile>, message: string): void {
+  if (!validator.Check(value)) {
+    const first = [...validator.Errors(value)][0];
+    throw new ProtocolError(`${message}${first ? `: ${first.message}` : ""}`);
   }
-  if (typeof parsed !== "object" || parsed === null || typeof (parsed as { type?: unknown }).type !== "string") {
-    throw new ProtocolError("invalid Arena Hero WebSocket message");
-  }
-  const envelope = parsed as Record<string, unknown>;
-  if (envelope.type === "tick") {
-    if (typeof envelope.data !== "number" || !Number.isInteger(envelope.data) || envelope.data < 1) {
-      throw new ProtocolError("invalid tick message");
-    }
-    return { type: "tick", data: envelope.data };
-  }
-  if (envelope.type === "state") {
-    return { type: "state", data: envelope.data };
-  }
-  if (envelope.type === "received") {
-    return { type: "received", data: envelope.data };
-  }
-  throw new ProtocolError(`unknown message type: ${envelope.type}`);
 }
 
 /** Parse one server WebSocket text message. */
@@ -55,18 +37,25 @@ export function parseStreamMessage(raw: string | Uint8Array): Tick | PlayerState
   if (raw instanceof Uint8Array) {
     throw new ProtocolError("the server sent a binary WebSocket message");
   }
-  const envelope = parseEnvelope(raw);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new ProtocolError("invalid Arena Hero WebSocket message");
+  }
+  check(parsed, streamValidator, "invalid Arena Hero WebSocket message");
+  const envelope = parsed as { type: "tick" | "state" | "received"; data: unknown };
   if (envelope.type === "tick") {
-    return { tick: envelope.data } satisfies Tick;
+    return { tick: envelope.data as number } satisfies Tick;
   }
   if (envelope.type === "state") {
-    return parsePlayerState(envelope.data);
+    const state = envelope.data as PlayerState;
+    checkPlayerStateRelations(state); // domain 关系约束
+    return state;
   }
-  const received = envelope.data as Partial<Received>;
-  if (typeof received?.tick !== "number" || typeof received?.received_at !== "string" || received?.plan == null) {
-    throw new ProtocolError("invalid received message");
-  }
-  const rec = received as unknown as Received;
+  // received：data 内含 plan，用独立 schema 校验
+  check(envelope.data, receivedValidator, "invalid received message");
+  const rec = envelope.data as Received;
   checkReceivedConsistency(rec);
   return rec;
 }
@@ -100,18 +89,8 @@ export function parseAccepted(raw: Uint8Array): Accepted {
   } catch {
     throw new ProtocolError("invalid command acknowledgement");
   }
-  const a = parsed as Partial<Accepted>;
-  if (
-    a?.accepted !== true ||
-    typeof a.tick !== "number" ||
-    !Number.isInteger(a.tick) ||
-    a.tick < 1 ||
-    typeof a.received_at !== "string" ||
-    (a.source !== "AGENT" && a.source !== "MANUAL")
-  ) {
-    throw new ProtocolError("invalid command acknowledgement");
-  }
-  return a as Accepted;
+  check(parsed, acceptedValidator, "invalid command acknowledgement");
+  return parsed as Accepted;
 }
 
 /** Build a structured API error without exposing request credentials. */
