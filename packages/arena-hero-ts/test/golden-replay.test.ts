@@ -36,6 +36,7 @@ for (const file of files) {
     // 包成 state envelope（与 WS 线上格式一致）
     const envelope = JSON.stringify({ type: "state", data: raw });
     const state = parseStreamMessage(envelope);
+    assert.ok("status" in state, "expected PlayerState");
 
     assert.equal(state.status, "ACTIVE");
     assert.ok(Number.isInteger(state.resources) && state.resources >= 0);
