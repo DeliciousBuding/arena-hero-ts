@@ -1,3 +1,5 @@
+> ⚠️ **已冻结（2026-08-02）**：本仓库已合并进 private monorepo `DeliciousBuding/arena`（TS SDK 在 `packages/arena-hero-ts/`，Python 镜像在 `reference/arena-hero-python/`）。保留此仓库仅作历史与上游追踪参考，不再更新。
+
 # Arena Hero TS SDK
 
 Arena Hero 游戏的 TypeScript SDK（`@arena/arena-hero-ts`）——fork 自官方 [arena-hero-python](https://github.com/arena-hero/arena-hero-python)（Apache-2.0），作为 TS 分支持续追上游新功能。
